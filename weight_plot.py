@@ -205,13 +205,16 @@ function render(){
       const lastMonth=last.getUTCFullYear()*12+last.getUTCMonth();
       const monthStep=Math.max(1,Math.ceil((lastMonth-firstMonth+1)/7));
       for(let month=Math.ceil(firstMonth/monthStep)*monthStep;month<=lastMonth;month+=monthStep)
-        tickDates.push(new Date(Date.UTC(Math.floor(month/12),month%12,1)));
+        tickDates.push({date:new Date(Date.UTC(Math.floor(month/12),month%12,1)),yearBoundary:month%12===0});
     }
-    for(const date of tickDates){
+    for(const tick of tickDates){
+      const date=tick.date||tick;
       const stamp=date.getTime();if(stamp<start||stamp>end)continue;
-      const xx=x(stamp);el('line',{x1:xx,y1:top,x2:xx,y2:bottom,class:'grid'});
+      const xx=x(stamp);
+      if(tick.yearBoundary)el('line',{x1:xx,y1:top,x2:xx,y2:bottom,class:'grid year-boundary'});
+      else el('line',{x1:xx,y1:top,x2:xx,y2:bottom,class:'grid'});
       if(index===metrics.length-1){
-        const label=spanYears>=3?String(date.getUTCFullYear()):date.toLocaleDateString('de-DE',{month:'short',year:'2-digit',timeZone:'UTC'});
+        const label=spanYears>=3?String(date.getUTCFullYear()):date.toLocaleDateString('de-DE',{month:'short',year:tick.yearBoundary?'numeric':undefined,timeZone:'UTC'});
         text(xx,bottom+25,label,'middle');
       }
     }
