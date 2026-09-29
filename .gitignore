@@ -1,0 +1,6 @@
+Data/
+_pycache_/
+__pycache__/
+.venv/
+weight_plot.html
+.venv/
