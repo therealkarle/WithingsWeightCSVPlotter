@@ -147,11 +147,11 @@ nav.addEventListener('pointerdown',event=>{const p=navPoint(event),target=event.
 nav.addEventListener('pointermove',event=>{if(!navDrag)return;const p=navPoint(event),delta=(p-navDrag.x)/(NAV_W)*(domainEnd-domainStart);if(navDrag.type==='start')updateRange(Math.min(navDrag.timeStart+delta,viewEnd-(domainEnd-domainStart)*.005),viewEnd);else if(navDrag.type==='end')updateRange(viewStart,Math.max(navDrag.timeEnd+delta,viewStart+(domainEnd-domainStart)*.005));else updateRange(navDrag.timeStart+delta,navDrag.timeEnd+delta);});
 nav.addEventListener('pointerup',()=>navDrag=null);nav.addEventListener('pointercancel',()=>navDrag=null);
 function navPoint(event){const rect=nav.getBoundingClientRect();return NAV_L+(event.clientX-rect.left)/rect.width*NAV_W;}
-function showTooltip(event,date,period){
+function showTooltip(event,date,plotMetric,period){
   const mode=document.getElementById('aggregation').value,timestamp=new Date(date).getTime();
   const heading=document.createElement('div');heading.className='tooltip-date';
   heading.textContent=period==='week'?'Woche ab '+new Date(date).toLocaleDateString('de-DE'):period==='month'?'Monat ab '+new Date(date).toLocaleDateString('de-DE'):new Date(date).toLocaleString('de-DE');tooltip.replaceChildren(heading);
-  for(const metric of selectedMetrics()){
+  for(const metric of [plotMetric]){
     const data=series[metric],bucket=period==='week'?date.slice(0,10):date.slice(0,7)+'-01';
     const candidates=period==='week'?data.raw.filter(point=>point[2]===bucket):period==='month'?data.raw.filter(point=>point[3]===bucket):data.raw;
     let nearest=candidates[0]||data.raw[0];
@@ -167,7 +167,7 @@ function showTooltip(event,date,period){
   tooltip.style.left=Math.min(Math.max(8,event.clientX-rect.left+12,8),rect.width-tooltip.offsetWidth-8)+'px';
   tooltip.style.top=Math.min(Math.max(8,event.clientY-rect.top+12,8),rect.height-tooltip.offsetHeight-8)+'px';
 }
-function bindTooltip(node,date,period='raw'){node.addEventListener('mouseenter',event=>showTooltip(event,date,period));node.addEventListener('mousemove',event=>showTooltip(event,date,period));node.addEventListener('mouseleave',()=>tooltip.style.display='none');}
+function bindTooltip(node,date,metric,period='raw'){node.addEventListener('mouseenter',event=>showTooltip(event,date,metric,period));node.addEventListener('mousemove',event=>showTooltip(event,date,metric,period));node.addEventListener('mouseleave',()=>tooltip.style.display='none');}
 function render(){
   const metrics=selectedMetrics(),mode=document.getElementById('aggregation').value,W=1100,PANEL=420,H=metrics.length*PANEL+45,L=82,R=30,B=54,PW=W-L-R;
   svg.setAttribute('viewBox',`0 0 ${W} ${H}`);svg.replaceChildren();
@@ -184,20 +184,36 @@ function render(){
     text(L,top-17,metric,'start');
     for(let tick=0;tick<=5;tick++){const value=low+(high-low)*tick/5,yy=y(value);el('line',{x1:L,y1:yy,x2:W-R,y2:yy,class:'grid'});text(L-12,yy+4,value.toFixed(1));}
     el('line',{x1:L,y1:top,x2:L,y2:bottom,class:'axis'});el('line',{x1:L,y1:bottom,x2:W-R,y2:bottom,class:'axis'});
-    for(const point of data.raw){const stamp=new Date(point[0]).getTime();if(stamp<start||stamp>end)continue;const dot=el('circle',{cx:x(stamp),cy:y(point[1]),r:2.7,class:'raw-dot'});bindTooltip(dot,point[0]);}
+    for(const point of data.raw){const stamp=new Date(point[0]).getTime();if(stamp<start||stamp>end)continue;const dot=el('circle',{cx:x(stamp),cy:y(point[1]),r:2.7,class:'raw-dot'});bindTooltip(dot,point[0],metric);}
     if(mode==='week'||mode==='both'){
       const visible=data.week.filter(point=>new Date(point[0]).getTime()>=start&&new Date(point[0]).getTime()<=end);el('path',{d:pathFor(visible,x,y),class:'week-line'});
-      for(const point of visible){const target=el('circle',{cx:x(new Date(point[0]).getTime()),cy:y(point[1]),r:7,class:'hit-target'});bindTooltip(target,point[0],'week');}
+      for(const point of visible){const target=el('circle',{cx:x(new Date(point[0]).getTime()),cy:y(point[1]),r:7,class:'hit-target'});bindTooltip(target,point[0],metric,'week');}
     }
     if(mode==='month'||mode==='both'){
       const visible=data.month.filter(point=>new Date(point[0]).getTime()>=start&&new Date(point[0]).getTime()<=end);el('path',{d:pathFor(visible,x,y),class:'month-line'});
-      for(const point of visible){const dot=el('circle',{cx:x(new Date(point[0]).getTime()),cy:y(point[1]),r:3.8,class:'month-dot'});bindTooltip(dot,point[0],'month');}
+      for(const point of visible){const dot=el('circle',{cx:x(new Date(point[0]).getTime()),cy:y(point[1]),r:3.8,class:'month-dot'});bindTooltip(dot,point[0],metric,'month');}
     }
-    const tickCount=Math.min(7,Math.max(2,Math.ceil((end-start)/(365.25*86400000))+1));
-    for(let tick=0;tick<tickCount;tick++){
-      const date=new Date(start+(end-start)*tick/(tickCount-1)),xx=x(date.getTime());
-      el('line',{x1:xx,y1:top,x2:xx,y2:bottom,class:'grid'});
-      if(index===metrics.length-1)text(xx,bottom+25,String(date.getFullYear()),'middle');
+    const spanYears=(end-start)/(365.25*86400000),tickDates=[];
+    if(spanYears>=3){
+      const firstYear=new Date(start).getUTCFullYear();
+      const lastYear=new Date(end).getUTCFullYear();
+      const yearStep=Math.max(1,Math.ceil((lastYear-firstYear)/6));
+      for(let year=Math.ceil(firstYear/yearStep)*yearStep;year<=lastYear;year+=yearStep)tickDates.push(new Date(Date.UTC(year,0,1)));
+    }else{
+      const first=new Date(start),last=new Date(end);
+      const firstMonth=first.getUTCFullYear()*12+first.getUTCMonth();
+      const lastMonth=last.getUTCFullYear()*12+last.getUTCMonth();
+      const monthStep=Math.max(1,Math.ceil((lastMonth-firstMonth+1)/7));
+      for(let month=Math.ceil(firstMonth/monthStep)*monthStep;month<=lastMonth;month+=monthStep)
+        tickDates.push(new Date(Date.UTC(Math.floor(month/12),month%12,1)));
+    }
+    for(const date of tickDates){
+      const stamp=date.getTime();if(stamp<start||stamp>end)continue;
+      const xx=x(stamp);el('line',{x1:xx,y1:top,x2:xx,y2:bottom,class:'grid'});
+      if(index===metrics.length-1){
+        const label=spanYears>=3?String(date.getUTCFullYear()):date.toLocaleDateString('de-DE',{month:'short',year:'2-digit',timeZone:'UTC'});
+        text(xx,bottom+25,label,'middle');
+      }
     }
   });
   const legend=el('g',{transform:`translate(${W-R-340},20)`});
