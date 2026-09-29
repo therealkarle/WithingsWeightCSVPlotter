@@ -104,6 +104,7 @@ main{max-width:1200px;margin:30px auto;padding:0 22px} h1{font-size:23px;font-we
 .aggregation-picker{display:grid;gap:6px;font-weight:550}select{font:inherit;padding:8px 34px 8px 10px;border:1px solid #c9cdd2;border-radius:5px;background:white;min-width:190px}
 .selection-status{font-size:12px;color:#777;margin-top:7px;min-height:16px}
 .chart{position:relative;background:white;border:1px solid #e5e5e5;border-top:0;padding:0 8px 4px;border-radius:0 0 8px 8px}svg{display:block;width:100%;height:auto}
+.time-navigator{background:#fff;border:1px solid #e5e5e5;border-top:0;padding:4px 12px 12px;border-radius:0 0 8px 8px}.time-navigator svg{height:52px;touch-action:none;user-select:none}.nav-track{fill:#eef2f8;stroke:#d1d9e6}.nav-window{fill:#7ba4f8;fill-opacity:.22;stroke:#6792ef;stroke-width:1}.nav-handle{fill:#6792ef;cursor:ew-resize}.nav-window{cursor:grab}.nav-labels{display:flex;justify-content:space-between;color:#5b6470;font-size:12px}
 .grid{stroke:#e2e2e2;stroke-width:1}.axis{stroke:#777;stroke-width:1}.tick{fill:#555;font-size:13px}.raw-dot{fill:#aaa;opacity:.52}
 .week-line{fill:none;stroke:#1479c9;stroke-width:2}.month-line{fill:none;stroke:#e3262e;stroke-width:2.7}.month-dot{fill:#e3262e;stroke:#fff;stroke-width:1}
 .hit-target{fill:transparent;stroke:transparent;pointer-events:all;cursor:crosshair}.raw-dot,.month-dot{cursor:crosshair}
@@ -114,14 +115,38 @@ main{max-width:1200px;margin:30px auto;padding:0 22px} h1{font-size:23px;font-we
 <section class="controls"><div class="metric-picker"><div class="metric-title">Messgrößen (bis zu 3)</div><div class="metric-options" id="metric-options">__METRIC_OPTIONS__</div><div class="selection-status" id="selection-status">1 von 3 ausgewählt</div></div>
 <label class="aggregation-picker" for="aggregation">Aggregation<select id="aggregation"><option value="both">Woche + Monat</option><option value="week">Wöchentlich</option><option value="month">Monatlich</option></select></label></section>
 <div class="chart"><svg id="weight-chart" viewBox="0 0 1100 465" role="img" aria-label="Interaktiver Verlauf der Withings-Messwerte"></svg><div class="tooltip" id="tooltip"></div></div>
+<div class="time-navigator"><svg id="time-navigator" viewBox="0 0 1100 52" aria-label="Zeitraum auswählen"></svg><div class="nav-labels"><span id="range-start"></span><span id="range-end"></span></div></div>
 <p class="hint">Graue Punkte zeigen Einzelmessungen. Wochenmittel sind blau, Monatsmittel rot. Beim Überfahren eines Punkts erscheinen Einzelwert und eingeschaltete Mittelwerte.</p></main>
 <script>
 const series=__SERIES_DATA__;
-const svg=document.getElementById('weight-chart'),tooltip=document.getElementById('tooltip'),NS='http://www.w3.org/2000/svg';
+const svg=document.getElementById('weight-chart'),tooltip=document.getElementById('tooltip'),nav=document.getElementById('time-navigator'),NS='http://www.w3.org/2000/svg';
+const NAV_W=1100,NAV_L=8,NAV_R=8,NAV_PW=NAV_W-NAV_L-NAV_R;
+const domainDates=Object.values(series).flatMap(data=>data.raw.map(point=>new Date(point[0]).getTime())),domainStart=Math.min(...domainDates),domainEnd=Math.max(...domainDates);
+let viewStart=domainStart,viewEnd=domainEnd,navDrag=null;
 function el(tag,attrs={},parent=svg){const node=document.createElementNS(NS,tag);for(const [key,value] of Object.entries(attrs))node.setAttribute(key,value);parent.appendChild(node);return node;}
 function text(x,y,value,anchor='end',parent=svg){const node=el('text',{x,y,'text-anchor':anchor,class:'tick'},parent);node.textContent=value;return node;}
 function pathFor(points,x,y){return points.map((point,index)=>(index?'L':'M')+x(new Date(point[0]).getTime()).toFixed(1)+','+y(point[1]).toFixed(1)).join(' ');}
 function selectedMetrics(){return [...document.querySelectorAll('#metric-options input:checked')].map(input=>input.value);}
+function formatDate(value){return new Date(value).toLocaleDateString('de-DE');}
+function updateRange(start,end){const span=domainEnd-domainStart;viewStart=Math.max(domainStart,Math.min(start,domainEnd-span*.005));viewEnd=Math.max(viewStart+span*.005,Math.min(end,domainEnd));tooltip.style.display='none';render();renderNavigator();}
+function renderNavigator(){
+  nav.replaceChildren();const x=value=>NAV_L+(value-domainStart)/(domainEnd-domainStart||1)*NAV_PW;
+  el('rect',{x:NAV_L,y:12,width:NAV_PW,height:28,rx:4,class:'nav-track'},nav);
+  const overview=Object.values(series).find(data=>data.raw.length)?.raw||[];
+  if(overview.length){const vals=overview.map(point=>point[1]),lo=Math.min(...vals),hi=Math.max(...vals),span=hi-lo||1;
+    const path=overview.map((point,i)=>(i?'L':'M')+x(new Date(point[0]).getTime()).toFixed(1)+','+(35-(point[1]-lo)/span*18).toFixed(1)).join(' ');
+    el('path',{d:path,fill:'none',stroke:'#b8c8e3','stroke-width':1.2},nav);
+  }
+  const left=x(viewStart),right=x(viewEnd);
+  el('rect',{x:left,y:7,width:Math.max(1,right-left),height:38,rx:3,class:'nav-window'},nav);
+  el('rect',{x:left-2,y:8,width:6,height:36,rx:2,class:'nav-handle','data-handle':'start'},nav);
+  el('rect',{x:right-4,y:8,width:6,height:36,rx:2,class:'nav-handle','data-handle':'end'},nav);
+  document.getElementById('range-start').textContent=formatDate(viewStart);document.getElementById('range-end').textContent=formatDate(viewEnd);
+}
+nav.addEventListener('pointerdown',event=>{const p=navPoint(event),target=event.target.closest('[data-handle]');navDrag={type:target?target.dataset.handle:'window',x:p,timeStart:viewStart,timeEnd:viewEnd};nav.setPointerCapture(event.pointerId);});
+nav.addEventListener('pointermove',event=>{if(!navDrag)return;const p=navPoint(event),delta=(p-navDrag.x)/(NAV_W)*(domainEnd-domainStart);if(navDrag.type==='start')updateRange(Math.min(navDrag.timeStart+delta,viewEnd-(domainEnd-domainStart)*.005),viewEnd);else if(navDrag.type==='end')updateRange(viewStart,Math.max(navDrag.timeEnd+delta,viewStart+(domainEnd-domainStart)*.005));else updateRange(navDrag.timeStart+delta,navDrag.timeEnd+delta);});
+nav.addEventListener('pointerup',()=>navDrag=null);nav.addEventListener('pointercancel',()=>navDrag=null);
+function navPoint(event){const rect=nav.getBoundingClientRect();return NAV_L+(event.clientX-rect.left)/rect.width*NAV_W;}
 function showTooltip(event,date,period){
   const mode=document.getElementById('aggregation').value,timestamp=new Date(date).getTime();
   const heading=document.createElement('div');heading.className='tooltip-date';
@@ -147,7 +172,7 @@ function render(){
   const metrics=selectedMetrics(),mode=document.getElementById('aggregation').value,W=1100,PANEL=420,H=metrics.length*PANEL+45,L=82,R=30,B=54,PW=W-L-R;
   svg.setAttribute('viewBox',`0 0 ${W} ${H}`);svg.replaceChildren();
   const allDates=metrics.flatMap(metric=>series[metric].raw.map(point=>new Date(point[0]).getTime()));
-  const start=Math.min(...allDates),end=Math.max(...allDates),x=value=>L+(value-start)/(end-start||1)*PW;
+  const start=viewStart,end=viewEnd,x=value=>L+(value-start)/(end-start||1)*PW;
   metrics.forEach((metric,index)=>{
     const data=series[metric],unit=data.unit,top=42+index*PANEL,bottom=top+PANEL-B,PH=bottom-top;
     let values=data.raw.map(point=>point[1]);
@@ -159,14 +184,14 @@ function render(){
     text(L,top-17,metric,'start');
     for(let tick=0;tick<=5;tick++){const value=low+(high-low)*tick/5,yy=y(value);el('line',{x1:L,y1:yy,x2:W-R,y2:yy,class:'grid'});text(L-12,yy+4,value.toFixed(1));}
     el('line',{x1:L,y1:top,x2:L,y2:bottom,class:'axis'});el('line',{x1:L,y1:bottom,x2:W-R,y2:bottom,class:'axis'});
-    for(const point of data.raw){const dot=el('circle',{cx:x(new Date(point[0]).getTime()),cy:y(point[1]),r:2.7,class:'raw-dot'});bindTooltip(dot,point[0]);}
+    for(const point of data.raw){const stamp=new Date(point[0]).getTime();if(stamp<start||stamp>end)continue;const dot=el('circle',{cx:x(stamp),cy:y(point[1]),r:2.7,class:'raw-dot'});bindTooltip(dot,point[0]);}
     if(mode==='week'||mode==='both'){
-      el('path',{d:pathFor(data.week,x,y),class:'week-line'});
-      for(const point of data.week){const target=el('circle',{cx:x(new Date(point[0]).getTime()),cy:y(point[1]),r:7,class:'hit-target'});bindTooltip(target,point[0],'week');}
+      const visible=data.week.filter(point=>new Date(point[0]).getTime()>=start&&new Date(point[0]).getTime()<=end);el('path',{d:pathFor(visible,x,y),class:'week-line'});
+      for(const point of visible){const target=el('circle',{cx:x(new Date(point[0]).getTime()),cy:y(point[1]),r:7,class:'hit-target'});bindTooltip(target,point[0],'week');}
     }
     if(mode==='month'||mode==='both'){
-      el('path',{d:pathFor(data.month,x,y),class:'month-line'});
-      for(const point of data.month){const dot=el('circle',{cx:x(new Date(point[0]).getTime()),cy:y(point[1]),r:3.8,class:'month-dot'});bindTooltip(dot,point[0],'month');}
+      const visible=data.month.filter(point=>new Date(point[0]).getTime()>=start&&new Date(point[0]).getTime()<=end);el('path',{d:pathFor(visible,x,y),class:'month-line'});
+      for(const point of visible){const dot=el('circle',{cx:x(new Date(point[0]).getTime()),cy:y(point[1]),r:3.8,class:'month-dot'});bindTooltip(dot,point[0],'month');}
     }
     const tickCount=Math.min(7,Math.max(2,Math.ceil((end-start)/(365.25*86400000))+1));
     for(let tick=0;tick<tickCount;tick++){
@@ -180,13 +205,14 @@ function render(){
   el('line',{x1:145,y1:0,x2:167,y2:0,class:'week-line'},legend);text(174,4,'Wochenmittel','start',legend);
   el('line',{x1:265,y1:0,x2:287,y2:0,class:'month-line'},legend);text(294,4,'Monatsmittel','start',legend);
 }
+svg.addEventListener('wheel',event=>{event.preventDefault();const rect=svg.getBoundingClientRect(),coord=(event.clientX-rect.left)/rect.width*1100,fraction=Math.max(0,Math.min(1,(coord-82)/(1100-82-30))),anchor=viewStart+fraction*(viewEnd-viewStart),factor=event.deltaY<0?.8:1.25;const span=Math.min(domainEnd-domainStart,Math.max((domainEnd-domainStart)*.005,(viewEnd-viewStart)*factor));updateRange(anchor-fraction*span,anchor+(1-fraction)*span);},{passive:false});
 document.querySelectorAll('#metric-options input').forEach(input=>input.addEventListener('change',event=>{
   const count=selectedMetrics().length,status=document.getElementById('selection-status');
   if(count>3){event.target.checked=false;status.textContent='Es können höchstens 3 Messgrößen ausgewählt werden.';return;}
   if(count===0){event.target.checked=true;status.textContent='Bitte mindestens eine Messgröße ausgewählt lassen.';return;}
   status.textContent=count+' von 3 ausgewählt';tooltip.style.display='none';render();
 }));
-document.getElementById('aggregation').addEventListener('change',()=>{tooltip.style.display='none';render();});render();
+document.getElementById('aggregation').addEventListener('change',()=>{tooltip.style.display='none';render();});render();renderNavigator();
 </script></body></html>'''
     page = page.replace("__METRIC_OPTIONS__", options).replace("__SERIES_DATA__", payload)
     output.write_text(page, encoding="utf-8")
