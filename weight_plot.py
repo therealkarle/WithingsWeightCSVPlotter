@@ -126,6 +126,16 @@ let viewStart=domainStart,viewEnd=domainEnd,navDrag=null;
 function el(tag,attrs={},parent=svg){const node=document.createElementNS(NS,tag);for(const [key,value] of Object.entries(attrs))node.setAttribute(key,value);parent.appendChild(node);return node;}
 function text(x,y,value,anchor='end',parent=svg){const node=el('text',{x,y,'text-anchor':anchor,class:'tick'},parent);node.textContent=value;return node;}
 function pathFor(points,x,y){return points.map((point,index)=>(index?'L':'M')+x(new Date(point[0]).getTime()).toFixed(1)+','+y(point[1]).toFixed(1)).join(' ');}
+function axisScale(values,unit){
+  let low=Math.min(...values),high=Math.max(...values),span=high-low;
+  if(span===0)span=Math.max(Math.abs(low)*.02,unit==='kg'?.5:.5);
+  const roughStep=span/5,power=10**Math.floor(Math.log10(roughStep)),fraction=roughStep/power;
+  const step=(fraction<=1?1:fraction<=2?2:fraction<=2.5?2.5:fraction<=5?5:10)*power;
+  low=Math.floor((low-span*.04)/step)*step;high=Math.ceil((high+span*.04)/step)*step;
+  if(unit==='kg')low=Math.max(0,low);
+  if(high<=low)high=low+step;
+  return {low,high,step};
+}
 function selectedMetrics(){return [...document.querySelectorAll('#metric-options input:checked')].map(input=>input.value);}
 function formatDate(value){return new Date(value).toLocaleDateString('de-DE');}
 function updateRange(start,end){const span=domainEnd-domainStart;viewStart=Math.max(domainStart,Math.min(start,domainEnd-span*.005));viewEnd=Math.max(viewStart+span*.005,Math.min(end,domainEnd));tooltip.style.display='none';render();renderNavigator();}
@@ -171,18 +181,15 @@ function bindTooltip(node,date,metric,period='raw'){node.addEventListener('mouse
 function render(){
   const metrics=selectedMetrics(),mode=document.getElementById('aggregation').value,W=1100,PANEL=420,H=metrics.length*PANEL+45,L=82,R=30,B=54,PW=W-L-R;
   svg.setAttribute('viewBox',`0 0 ${W} ${H}`);svg.replaceChildren();
-  const allDates=metrics.flatMap(metric=>series[metric].raw.map(point=>new Date(point[0]).getTime()));
   const start=viewStart,end=viewEnd,x=value=>L+(value-start)/(end-start||1)*PW;
   metrics.forEach((metric,index)=>{
     const data=series[metric],unit=data.unit,top=42+index*PANEL,bottom=top+PANEL-B,PH=bottom-top;
-    let values=data.raw.map(point=>point[1]);
-    if(mode==='week'||mode==='both')values=values.concat(data.week.map(point=>point[1]));
-    if(mode==='month'||mode==='both')values=values.concat(data.month.map(point=>point[1]));
-    let low=Math.min(...values),high=Math.max(...values);const range=high-low||1;
-    low=unit==='kg'?Math.max(0,Math.floor((low-range*.08)*2)/2):Math.floor((low-range*.08)*2)/2;
-    high=Math.ceil((high+range*.08)*2)/2;const y=value=>top+(high-value)/(high-low||1)*PH;
+    let visiblePoints=data.raw.filter(point=>{const stamp=new Date(point[0]).getTime();return stamp>=start&&stamp<=end;});
+    if(mode==='week'||mode==='both')visiblePoints=visiblePoints.concat(data.week.filter(point=>{const stamp=new Date(point[0]).getTime();return stamp>=start&&stamp<=end;}));
+    if(mode==='month'||mode==='both')visiblePoints=visiblePoints.concat(data.month.filter(point=>{const stamp=new Date(point[0]).getTime();return stamp>=start&&stamp<=end;}));
+    const scale=axisScale(visiblePoints.map(point=>point[1]),unit),{low,high,step}=scale,y=value=>top+(high-value)/(high-low)*PH;
     text(L,top-17,metric,'start');
-    for(let tick=0;tick<=5;tick++){const value=low+(high-low)*tick/5,yy=y(value);el('line',{x1:L,y1:yy,x2:W-R,y2:yy,class:'grid'});text(L-12,yy+4,value.toFixed(1));}
+    for(let value=low;value<=high+step*.001;value+=step){const yy=y(value);el('line',{x1:L,y1:yy,x2:W-R,y2:yy,class:'grid'});text(L-12,yy+4,value.toLocaleString('de-DE',{maximumFractionDigits:2}));}
     el('line',{x1:L,y1:top,x2:L,y2:bottom,class:'axis'});el('line',{x1:L,y1:bottom,x2:W-R,y2:bottom,class:'axis'});
     for(const point of data.raw){const stamp=new Date(point[0]).getTime();if(stamp<start||stamp>end)continue;const dot=el('circle',{cx:x(stamp),cy:y(point[1]),r:2.7,class:'raw-dot'});bindTooltip(dot,point[0],metric);}
     if(mode==='week'||mode==='both'){
