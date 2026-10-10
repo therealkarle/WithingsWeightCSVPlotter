@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create an interactive, offline plot from a Withings weight.csv export."""
+"""Create an interactive, offline plot from a Withings CSV export."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import csv
 import html
 import json
+import re
 import webbrowser
 from collections import defaultdict
 from datetime import datetime
@@ -21,7 +22,26 @@ SOURCE_METRICS = [
     "Wasseranteil (kg)",
 ]
 METRICS = [*SOURCE_METRICS, "KFA (%)", "Muskelanteil (%)"]
-PERCENT_METRICS = {"KFA (%)", "Muskelanteil (%)"}
+TEMPERATURE_VALUE_HEADER = re.compile(r"^value\s*[\(\[]\s*°\s*([cf])\s*[\)\]]$", re.IGNORECASE)
+
+
+def metric_label(column: str) -> str:
+    column = column.strip()
+    temperature_header = TEMPERATURE_VALUE_HEADER.fullmatch(column)
+    if temperature_header:
+        return f"Körpertemperatur (°{temperature_header.group(1).upper()})"
+    return column
+
+
+def metric_unit(metric: str) -> str:
+    match = re.search(r"[\(\[]\s*([^\)\]]+)\s*[\)\]]$", metric)
+    if match:
+        return match.group(1).strip()
+    return "kg" if metric in SOURCE_METRICS else ""
+
+
+def parse_numeric(value: str) -> float:
+    return float(value.strip().replace(",", "."))
 
 
 def week_start(date: datetime) -> str:
@@ -32,16 +52,43 @@ def read_measurements(path: Path) -> list[dict]:
     rows = []
     with path.open("r", encoding="utf-8-sig", newline="") as source:
         reader = csv.DictReader(source)
-        missing = [column for column in ["Date", *SOURCE_METRICS] if column not in (reader.fieldnames or [])]
-        if missing:
-            raise ValueError("Fehlende CSV-Spalten: " + ", ".join(missing))
-        for line, row in enumerate(reader, start=2):
+        fieldnames = reader.fieldnames or []
+        date_column = next((column for column in fieldnames if column and column.strip().casefold() == "date"), None)
+        if date_column is None:
+            raise ValueError("Fehlende CSV-Spalte: Date")
+
+        source_rows = list(reader)
+        metric_columns = []
+        normalized_source_metrics = {metric.casefold() for metric in SOURCE_METRICS}
+        ignored_columns = {"comment", "comments", "note", "notes"}
+        for column in fieldnames:
+            if not column or column == date_column:
+                continue
+            label = metric_label(column)
+            if column.strip().casefold() in ignored_columns:
+                continue
+            populated = [(row.get(column) or "").strip() for row in source_rows if (row.get(column) or "").strip()]
+            if not populated:
+                continue
             try:
-                date = datetime.fromisoformat(row["Date"].strip())
+                for value in populated:
+                    parse_numeric(value)
+            except ValueError as error:
+                if column.strip().casefold() in normalized_source_metrics:
+                    raise ValueError(f"Ungültiger Messwert in Spalte {column.strip()}: {error}") from error
+                continue
+            metric_columns.append((column, label))
+
+        if not metric_columns:
+            raise ValueError("Keine numerischen Messspalten gefunden. Die CSV benötigt mindestens eine Messgröße neben Date.")
+
+        for line, row in enumerate(source_rows, start=2):
+            try:
+                date = datetime.fromisoformat((row.get(date_column) or "").strip())
                 values = {
-                    metric: float(row[metric].replace(",", "."))
-                    for metric in SOURCE_METRICS
-                    if row[metric].strip()
+                    label: parse_numeric(row[column])
+                    for column, label in metric_columns
+                    if (row.get(column) or "").strip()
                 }
             except (ValueError, AttributeError) as error:
                 raise ValueError(f"Ungültiger Messwert in CSV-Zeile {line}: {error}") from error
@@ -73,12 +120,15 @@ def averages(rows: list[dict], metric: str, period: str) -> list[list]:
 
 def build_page(rows: list[dict], output: Path) -> None:
     series = {}
-    for metric in METRICS:
+    present_metrics = list(dict.fromkeys(metric for row in rows for metric in row["values"]))
+    ordered_metrics = [metric for metric in METRICS if metric in present_metrics]
+    ordered_metrics.extend(metric for metric in present_metrics if metric not in METRICS)
+    for metric in ordered_metrics:
         metric_rows = [row for row in rows if metric in row["values"]]
         if not metric_rows:
             continue
         series[metric] = {
-            "unit": "%" if metric in PERCENT_METRICS else "kg",
+            "unit": metric_unit(metric),
             "raw": [
                 [row["date"].isoformat(sep=" "), row["values"][metric], week_start(row["date"]), row["date"].strftime("%Y-%m-01")]
                 for row in metric_rows
@@ -88,13 +138,19 @@ def build_page(rows: list[dict], output: Path) -> None:
         }
 
     payload = json.dumps(series, ensure_ascii=False).replace("</", "<\\/").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    if any(metric in series for metric in ("Gewicht (kg)", "KFA (%)", "Muskelanteil (%)")):
+        page_title = "Withings – Gewicht & Körperzusammensetzung"
+    elif any(metric.startswith("Körpertemperatur (") for metric in series):
+        page_title = "Withings – Körpertemperatur"
+    else:
+        page_title = "Withings – Messwerte"
     options = "\n".join(
         f'<label class="metric-option"><input type="checkbox" value="{html.escape(metric)}"{" checked" if index == 0 else ""}><span>{html.escape(metric)}</span></label>'
         for index, metric in enumerate(series)
     )
     page = '''<!doctype html>
 <html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Withings Gewichtsdaten</title>
+<title>__PAGE_TITLE__</title>
 <style>
 *{box-sizing:border-box} body{margin:0;background:#f5f6f8;color:#242424;font:15px system-ui,-apple-system,"Segoe UI",sans-serif}
 main{max-width:1200px;margin:30px auto;padding:0 22px} h1{font-size:23px;font-weight:600;margin:0 0 18px}
@@ -111,7 +167,7 @@ main{max-width:1200px;margin:30px auto;padding:0 22px} h1{font-size:23px;font-we
 .tooltip{display:none;position:absolute;z-index:2;pointer-events:none;min-width:210px;max-width:320px;background:rgba(255,255,255,.97);border:1px solid #c9cdd2;border-radius:6px;box-shadow:0 3px 14px #0002;padding:10px 12px;font-size:13px;line-height:1.5}
 .tooltip-date{font-weight:650;margin-bottom:5px}.tooltip-metric{font-weight:600;margin-top:4px}.tooltip-values{color:#444}
 .hint{color:#777;font-size:13px;margin:12px 2px}@media(max-width:600px){main{margin:16px auto;padding:0 10px}.controls{gap:12px}.metric-picker{min-width:100%}.aggregation-picker,select{width:100%}}
-</style></head><body><main><h1>Withings – Gewicht &amp; Körperzusammensetzung</h1>
+</style></head><body><main><h1>__PAGE_TITLE__</h1>
 <section class="controls"><div class="metric-picker"><div class="metric-title">Messgrößen (bis zu 3)</div><div class="metric-options" id="metric-options">__METRIC_OPTIONS__</div><div class="selection-status" id="selection-status">1 von 3 ausgewählt</div></div>
 <label class="aggregation-picker" for="aggregation">Aggregation<select id="aggregation"><option value="both">Woche + Monat</option><option value="week">Wöchentlich</option><option value="month">Monatlich</option></select></label></section>
 <div class="chart"><svg id="weight-chart" viewBox="0 0 1100 465" role="img" aria-label="Interaktiver Verlauf der Withings-Messwerte"></svg><div class="tooltip" id="tooltip"></div></div>
@@ -240,12 +296,13 @@ document.querySelectorAll('#metric-options input').forEach(input=>input.addEvent
 }));
 document.getElementById('aggregation').addEventListener('change',()=>{tooltip.style.display='none';render();});render();renderNavigator();
 </script></body></html>'''
-    page = page.replace("__METRIC_OPTIONS__", options).replace("__SERIES_DATA__", payload)
+    escaped_title = html.escape(page_title)
+    page = page.replace("__PAGE_TITLE__", escaped_title).replace("__METRIC_OPTIONS__", options).replace("__SERIES_DATA__", payload)
     output.write_text(page, encoding="utf-8")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Interaktiver Plot für einen Withings weight.csv Export")
+    parser = argparse.ArgumentParser(description="Interaktiver Plot für einen Withings-CSV-Export")
     parser.add_argument("--csv", type=Path, default=Path(__file__).parent / "Data" / "weight.csv", help="Pfad zur Withings-CSV")
     parser.add_argument("--output", type=Path, help="HTML-Ausgabedatei (Standard: neben dem Skript)")
     parser.add_argument("--no-open", action="store_true", help="HTML-Datei nicht automatisch im Browser öffnen")

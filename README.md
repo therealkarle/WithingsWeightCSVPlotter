@@ -1,10 +1,10 @@
 # Withings Weight CSV Plotter
 
-A small, dependency-free Python script that turns a Withings `weight.csv` export into an interactive chart you can open in your browser. The chart is generated locally as a standalone HTML file and works offline.
+A small, dependency-free Python script that turns Withings CSV exports into interactive charts you can open in your browser. The chart is generated locally as a standalone HTML file and works offline.
 
 ## Features
 
-- Plot individual measurements for weight and body composition.
+- Plot individual measurements from weight, body composition, body temperature, and other numeric Withings exports.
 - Calculate body fat percentage from fat mass and weight, and muscle percentage from muscle mass and weight.
 - Select up to three metrics at once. Each metric has its own vertical scale.
 - View weekly averages, monthly averages, or both alongside the individual measurements.
@@ -15,7 +15,7 @@ A small, dependency-free Python script that turns a Withings `weight.csv` export
 ## Requirements
 
 - Python 3.10 or newer
-- A Withings `weight.csv` export with the columns described below
+- A Withings CSV export with a `Date` column and at least one numeric measurement column
 - No third-party Python packages are required
 
 ## Quick start
@@ -32,6 +32,12 @@ A small, dependency-free Python script that turns a Withings `weight.csv` export
    ```bash
    python weight_plot.py --csv "path/to/weight.csv"
    ```
+
+For another export, pass its CSV path in the same way. The repository includes a body-temperature example:
+
+```bash
+python weight_plot.py --csv "Data/body_temperature.csv" --output "body_temperature.html"
+```
 
 The script writes `weight_plot.html` next to `weight_plot.py` and opens it in your default browser. Open that HTML file again later to view the chart; the Python script does not need to stay running.
 
@@ -55,20 +61,22 @@ python weight_plot.py --csv "path/to/weight.csv" --output "chart.html" --no-open
 
 ## Using the chart
 
-- **Metrics:** check one to three metrics. At least one must stay selected. Available metrics are weight, fat mass, muscle mass, bone mass, water mass, body fat percentage, and muscle percentage. Percentages are calculated only when the corresponding mass and weight are present for a measurement.
+- **Metrics:** check one to three metrics. At least one must stay selected. Numeric columns are detected from the selected CSV. Weight exports include weight, fat mass, muscle mass, bone mass, water mass, body fat percentage, and muscle percentage. Temperature exports such as `body_temperature.csv` show body temperature, labeled Körpertemperatur (°C) in the chart. Percentages are calculated only when the corresponding mass and weight are present for a measurement.
 - **Aggregation:** choose weekly averages, monthly averages, or both. Gray dots show individual measurements, the blue line shows weekly averages, and the red line shows monthly averages.
 - **Details:** hover over a point to see its measurement and the weekly/monthly average for the matching period, when available.
 - **Date range:** drag the highlighted selection or its handles in the navigator below the chart to move or resize the visible range. Scroll over the chart to zoom around the pointer position.
 
 ## CSV format
 
-The file must contain these exact column names (as used in the Withings export):
+The CSV needs a `Date` column (case-insensitive) and at least one numeric measurement column. Known weight-export columns keep their existing names, and body-fat and muscle percentages are derived from the corresponding mass and weight. Other numeric columns are detected automatically; nonnumeric columns such as comments are ignored. Empty measurement cells are allowed.
+
+The weight export uses columns like these:
 
 ```csv
 Date,Gewicht (kg),Fettmasse (kg),Muskelmasse (kg),Knochenmasse (kg),Wasseranteil (kg)
 ```
 
-`Date` must be an ISO-formatted date or date and time, such as `2026-09-28 07:26:52`. Measurement columns may be empty when a value is unavailable. The script accepts decimal points or decimal commas in values and skips rows where all measurement fields are empty. It reports an error if a required column is missing, a date or value cannot be parsed, or no usable measurements are found.
+`Date` must be an ISO-formatted date or date and time, such as `2026-09-28 07:26:52`. Body-temperature exports can use a lowercase `date` header and a column such as `value (°C)`; that measurement is displayed as body temperature (Körpertemperatur (°C)). The script accepts decimal points or decimal commas in numeric values and skips rows where all measurement fields are empty. It reports an error if the date column is missing, a known weight metric contains an invalid value, or no usable measurements are found.
 
 ## Privacy
 
