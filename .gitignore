@@ -1,9 +1,9 @@
-Data/
+Data/*
+!Data/plotignore/
+Data/plotignore/*
+!Data/plotignore/.gitkeep
 _pycache_/
 __pycache__/
 .venv/
 weight_plot.html
 .venv/
-
-
-!Data/plotignore/.gitkeep
