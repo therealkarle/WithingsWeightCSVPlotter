@@ -6,12 +6,15 @@ from __future__ import annotations
 import argparse
 import csv
 import html
+import io
 import json
+import math
 import re
 import webbrowser
 from collections import defaultdict
-from datetime import datetime
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from pathlib import Path, PurePosixPath
+from zipfile import BadZipFile, ZipFile
 
 
 SOURCE_METRICS = [
@@ -23,13 +26,35 @@ SOURCE_METRICS = [
 ]
 METRICS = [*SOURCE_METRICS, "KFA (%)", "Muskelanteil (%)"]
 TEMPERATURE_VALUE_HEADER = re.compile(r"^value\s*[\(\[]\s*°\s*([cf])\s*[\)\]]$", re.IGNORECASE)
+DATE_HEADERS = {"date", "datum", "start", "von"}
+IGNORED_HEADERS = {
+    "date", "datum", "start", "von", "bis", "end", "to", "duration", "type", "unit", "position",
+    "comment", "comments", "note", "notes", "notizen", "gps", "timezone", "ändert",
+}
+ACTIVITY_METRICS = {
+    "calories": ("Calories", "kcal"),
+    "distance": ("Distance", "m"),
+    "elevation": ("Elevation", "m"),
+    "steps": ("Steps", "steps"),
+    "hr_average": ("Average heart rate", "bpm"),
+    "hr_min": ("Minimum heart rate", "bpm"),
+    "hr_max": ("Maximum heart rate", "bpm"),
+}
 
 
-def metric_label(column: str) -> str:
+def metric_label(column: str, source_name: str, row: dict) -> str:
     column = column.strip()
     temperature_header = TEMPERATURE_VALUE_HEADER.fullmatch(column)
     if temperature_header:
         return f"Körpertemperatur (°{temperature_header.group(1).upper()})"
+    if column.casefold() == "value":
+        kind = (row.get("type") or "").strip()
+        if kind:
+            label = re.sub(r"[_-]+", " ", kind).title()
+        else:
+            label = re.sub(r"[_-]+", " ", source_name).strip().title() or "Value"
+        unit = (row.get("unit") or "").strip()
+        return f"{label} ({unit})" if unit else label
     return column
 
 
@@ -41,69 +66,174 @@ def metric_unit(metric: str) -> str:
 
 
 def parse_numeric(value: str) -> float:
-    return float(value.strip().replace(",", "."))
+    number = float(value.strip().replace(",", "."))
+    if not math.isfinite(number):
+        raise ValueError("Messwert muss endlich sein")
+    return number
+
+
+def parse_datetime(value: str) -> datetime:
+    value = value.strip()
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        timestamp = float(value)
+        if abs(timestamp) >= 1_000_000_000_000:
+            timestamp /= 1000
+        if abs(timestamp) < 1_000_000_000:
+            raise ValueError("Datum muss ISO-Format oder Unix-Zeitstempel sein")
+        return datetime.fromtimestamp(timestamp, timezone.utc)
+
+
+def datetime_sort_key(value: datetime) -> float:
+    return value.timestamp()
 
 
 def week_start(date: datetime) -> str:
     return (date.date().fromordinal(date.date().toordinal() - date.weekday())).isoformat()
 
 
-def read_measurements(path: Path) -> list[dict]:
+def parse_numeric_values(value: str) -> list[float] | None:
+    try:
+        return [parse_numeric(value)]
+    except ValueError:
+        if not value.strip().startswith("["):
+            return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    try:
+        return [parse_numeric(str(item)) for item in parsed]
+    except (ValueError, TypeError):
+        return None
+
+
+def label_json_metric(key: str) -> str:
+    label, unit = ACTIVITY_METRICS.get(key, (re.sub(r"[_-]+", " ", key).strip().title(), ""))
+    return f"{label} ({unit})" if unit else label
+
+
+def read_measurements_from_reader(reader: csv.DictReader, source_name: str) -> list[dict]:
     rows = []
-    with path.open("r", encoding="utf-8-sig", newline="") as source:
-        reader = csv.DictReader(source)
-        fieldnames = reader.fieldnames or []
-        date_column = next((column for column in fieldnames if column and column.strip().casefold() == "date"), None)
-        if date_column is None:
-            raise ValueError("Fehlende CSV-Spalte: Date")
+    fieldnames = reader.fieldnames or []
+    date_column = next((column for column in fieldnames if column and column.strip().casefold() in DATE_HEADERS), None)
+    if date_column is None:
+        return rows
 
-        source_rows = list(reader)
-        metric_columns = []
-        normalized_source_metrics = {metric.casefold() for metric in SOURCE_METRICS}
-        ignored_columns = {"comment", "comments", "note", "notes"}
+    for row in reader:
+        raw_date = row.get(date_column) or ""
+        try:
+            date = parse_datetime(raw_date)
+        except (ValueError, AttributeError, OverflowError):
+            continue
+
+        values = {}
+        durations_column = next((column for column in fieldnames if column and column.strip().casefold() == "duration"), None)
+        durations = parse_numeric_values(row.get(durations_column) or "") if durations_column else None
         for column in fieldnames:
-            if not column or column == date_column:
+            if not column or column.strip().casefold() in IGNORED_HEADERS:
                 continue
-            label = metric_label(column)
-            if column.strip().casefold() in ignored_columns:
+            raw_value = (row.get(column) or "").strip()
+            if not raw_value:
                 continue
-            populated = [(row.get(column) or "").strip() for row in source_rows if (row.get(column) or "").strip()]
-            if not populated:
-                continue
-            try:
-                for value in populated:
-                    parse_numeric(value)
-            except ValueError as error:
-                if column.strip().casefold() in normalized_source_metrics:
-                    raise ValueError(f"Ungültiger Messwert in Spalte {column.strip()}: {error}") from error
-                continue
-            metric_columns.append((column, label))
 
-        if not metric_columns:
-            raise ValueError("Keine numerischen Messspalten gefunden. Die CSV benötigt mindestens eine Messgröße neben Date.")
-
-        for line, row in enumerate(source_rows, start=2):
-            try:
-                date = datetime.fromisoformat((row.get(date_column) or "").strip())
-                values = {
-                    label: parse_numeric(row[column])
-                    for column, label in metric_columns
-                    if (row.get(column) or "").strip()
-                }
-            except (ValueError, AttributeError) as error:
-                raise ValueError(f"Ungültiger Messwert in CSV-Zeile {line}: {error}") from error
-            if not values:
+            if column.strip().casefold() in {"daten", "data"}:
+                try:
+                    activity_data = json.loads(raw_value)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(activity_data, dict):
+                    for key, value in activity_data.items():
+                        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                            values[label_json_metric(key)] = float(value)
                 continue
-            weight = values.get("Gewicht (kg)")
-            if weight:
-                if "Fettmasse (kg)" in values:
-                    values["KFA (%)"] = values["Fettmasse (kg)"] / weight * 100
-                if "Muskelmasse (kg)" in values:
-                    values["Muskelanteil (%)"] = values["Muskelmasse (kg)"] / weight * 100
+
+            metric_values = parse_numeric_values(raw_value)
+            if metric_values is None:
+                continue
+            label = metric_label(column, source_name, row)
+            if len(metric_values) > 1:
+                offset = 0.0
+                for index, value in enumerate(metric_values):
+                    duration = durations[index] if durations and index < len(durations) else 0.0
+                    point_date = date + timedelta(seconds=offset + duration / 2)
+                    rows.append({"date": point_date, "values": {label: value}})
+                    offset += duration
+            elif metric_values:
+                values[label] = metric_values[0]
+
+        weight = values.get("Gewicht (kg)")
+        if weight:
+            if "Fettmasse (kg)" in values:
+                values["KFA (%)"] = values["Fettmasse (kg)"] / weight * 100
+            if "Muskelmasse (kg)" in values:
+                values["Muskelanteil (%)"] = values["Muskelmasse (kg)"] / weight * 100
+        if values:
             rows.append({"date": date, "values": values})
+    return rows
+
+
+def read_measurements(path: Path) -> list[dict]:
+    with path.open("r", encoding="utf-8-sig", newline="") as source:
+        return read_measurements_from_reader(csv.DictReader(source), path.stem)
+
+
+def is_plotignored(parts: tuple[str, ...]) -> bool:
+    return any(part.casefold() == "plotignore" for part in parts[:-1])
+
+
+def deduplicate_measurements(rows: list[dict]) -> list[dict]:
+    result = []
+    seen = set()
+    for row in rows:
+        values = {}
+        for metric, value in row["values"].items():
+            key = (datetime_sort_key(row["date"]), metric, value)
+            if key in seen:
+                continue
+            seen.add(key)
+            values[metric] = value
+        if values:
+            result.append({"date": row["date"], "values": values})
+    return sorted(result, key=lambda row: datetime_sort_key(row["date"]))
+
+
+def read_data_directory(data_dir: Path) -> tuple[list[dict], int]:
+    if not data_dir.is_dir():
+        raise ValueError(f"Datenordner nicht gefunden: {data_dir}")
+    rows = []
+    source_count = 0
+    files = sorted(
+        (path for path in data_dir.rglob("*") if path.is_file() and path.suffix.casefold() in {".csv", ".zip"}
+         and not is_plotignored(path.relative_to(data_dir).parts)),
+        key=lambda path: str(path).casefold(),
+    )
+    for path in files:
+        if path.suffix.casefold() == ".csv":
+            source_rows = read_measurements(path)
+            if source_rows:
+                rows.extend(source_rows)
+                source_count += 1
+            continue
+
+        with ZipFile(path) as archive:
+            for entry in archive.infolist():
+                entry_path = PurePosixPath(entry.filename)
+                if entry.is_dir() or entry_path.suffix.casefold() != ".csv" or is_plotignored(entry_path.parts):
+                    continue
+                with archive.open(entry) as raw_source:
+                    text_source = io.TextIOWrapper(raw_source, encoding="utf-8-sig", newline="")
+                    source_rows = read_measurements_from_reader(csv.DictReader(text_source), entry_path.stem)
+                if source_rows:
+                    rows.extend(source_rows)
+                    source_count += 1
+    rows = deduplicate_measurements(rows)
     if not rows:
-        raise ValueError("Die CSV-Datei enthält keine Messwerte.")
-    return sorted(rows, key=lambda row: row["date"])
+        raise ValueError(f"Keine Messwerte in {data_dir} gefunden.")
+    return rows, source_count
 
 
 def averages(rows: list[dict], metric: str, period: str) -> list[list]:
@@ -118,29 +248,53 @@ def averages(rows: list[dict], metric: str, period: str) -> list[list]:
     return [[key, sum(values) / len(values)] for key, values in sorted(buckets.items())]
 
 
+def build_display_points(rows: list[dict], metric: str, limit: int = 5000) -> tuple[list[list], bool]:
+    def point(row: dict) -> list:
+        date = row["date"]
+        return [date.isoformat(sep=" "), row["values"][metric], week_start(date), date.strftime("%Y-%m-01")]
+
+    if len(rows) <= limit:
+        return [point(row) for row in rows], False
+    bucket_count = max(1, (limit - 2) // 2)
+    selected_indices = {0, len(rows) - 1}
+    for bucket in range(bucket_count):
+        start = bucket * len(rows) // bucket_count
+        end = (bucket + 1) * len(rows) // bucket_count
+        if end <= start:
+            continue
+        selected_indices.add(min(range(start, end), key=lambda index: rows[index]["values"][metric]))
+        selected_indices.add(max(range(start, end), key=lambda index: rows[index]["values"][metric]))
+    return [point(rows[index]) for index in sorted(selected_indices)], True
+
+
 def build_page(rows: list[dict], output: Path) -> None:
     series = {}
-    present_metrics = list(dict.fromkeys(metric for row in rows for metric in row["values"]))
+    sampled_metrics = []
+    rows_by_metric = defaultdict(list)
+    for row in rows:
+        for metric in row["values"]:
+            rows_by_metric[metric].append(row)
+    present_metrics = list(rows_by_metric)
     ordered_metrics = [metric for metric in METRICS if metric in present_metrics]
     ordered_metrics.extend(metric for metric in present_metrics if metric not in METRICS)
     for metric in ordered_metrics:
-        metric_rows = [row for row in rows if metric in row["values"]]
+        metric_rows = rows_by_metric[metric]
         if not metric_rows:
             continue
+        display_points, sampled = build_display_points(metric_rows, metric)
+        if sampled:
+            sampled_metrics.append(metric)
         series[metric] = {
             "unit": metric_unit(metric),
-            "raw": [
-                [row["date"].isoformat(sep=" "), row["values"][metric], week_start(row["date"]), row["date"].strftime("%Y-%m-01")]
-                for row in metric_rows
-            ],
+            "raw": display_points,
             "week": averages(metric_rows, metric, "week"),
             "month": averages(metric_rows, metric, "month"),
         }
 
-    payload = json.dumps(series, ensure_ascii=False).replace("</", "<\\/").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
-    if any(metric in series for metric in ("Gewicht (kg)", "KFA (%)", "Muskelanteil (%)")):
+    payload = json.dumps(series, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    if series and set(series).issubset(METRICS):
         page_title = "Withings – Gewicht & Körperzusammensetzung"
-    elif any(metric.startswith("Körpertemperatur (") for metric in series):
+    elif len(series) == 1 and any(metric.startswith("Körpertemperatur (") for metric in series):
         page_title = "Withings – Körpertemperatur"
     else:
         page_title = "Withings – Messwerte"
@@ -172,12 +326,13 @@ main{max-width:1200px;margin:30px auto;padding:0 22px} h1{font-size:23px;font-we
 <label class="aggregation-picker" for="aggregation">Aggregation<select id="aggregation"><option value="both">Woche + Monat</option><option value="week">Wöchentlich</option><option value="month">Monatlich</option></select></label></section>
 <div class="chart"><svg id="weight-chart" viewBox="0 0 1100 465" role="img" aria-label="Interaktiver Verlauf der Withings-Messwerte"></svg><div class="tooltip" id="tooltip"></div></div>
 <div class="time-navigator"><svg id="time-navigator" viewBox="0 0 1100 52" aria-label="Zeitraum auswählen"></svg><div class="nav-labels"><span id="range-start"></span><span id="range-end"></span></div></div>
-<p class="hint">Graue Punkte zeigen Einzelmessungen. Wochenmittel sind blau, Monatsmittel rot. Beim Überfahren eines Punkts erscheinen Einzelwert und eingeschaltete Mittelwerte.</p></main>
+<p class="hint">Graue Punkte zeigen Einzelmessungen. Wochenmittel sind blau, Monatsmittel rot. Beim Überfahren eines Punkts erscheinen Einzelwert und eingeschaltete Mittelwerte.__SAMPLING_NOTE__</p></main>
 <script>
 const series=__SERIES_DATA__;
 const svg=document.getElementById('weight-chart'),tooltip=document.getElementById('tooltip'),nav=document.getElementById('time-navigator'),NS='http://www.w3.org/2000/svg';
 const NAV_W=1100,NAV_L=8,NAV_R=8,NAV_PW=NAV_W-NAV_L-NAV_R;
-const domainDates=Object.values(series).flatMap(data=>data.raw.map(point=>new Date(point[0]).getTime())),domainStart=Math.min(...domainDates),domainEnd=Math.max(...domainDates);
+let domainStart=Infinity,domainEnd=-Infinity;
+for(const data of Object.values(series))for(const point of data.raw){const stamp=new Date(point[0]).getTime();if(stamp<domainStart)domainStart=stamp;if(stamp>domainEnd)domainEnd=stamp;}
 let viewStart=domainStart,viewEnd=domainEnd,navDrag=null;
 function el(tag,attrs={},parent=svg){const node=document.createElementNS(NS,tag);for(const [key,value] of Object.entries(attrs))node.setAttribute(key,value);parent.appendChild(node);return node;}
 function text(x,y,value,anchor='end',parent=svg){const node=el('text',{x,y,'text-anchor':anchor,class:'tick'},parent);node.textContent=value;return node;}
@@ -297,23 +452,30 @@ document.querySelectorAll('#metric-options input').forEach(input=>input.addEvent
 document.getElementById('aggregation').addEventListener('change',()=>{tooltip.style.display='none';render();});render();renderNavigator();
 </script></body></html>'''
     escaped_title = html.escape(page_title)
-    page = page.replace("__PAGE_TITLE__", escaped_title).replace("__METRIC_OPTIONS__", options).replace("__SERIES_DATA__", payload)
+    sampling_note = " Dichte Messreihen zeigen bis zu 5.000 repräsentative Punkte; Wochen- und Monatsmittel berücksichtigen alle Messungen." if sampled_metrics else ""
+    page = page.replace("__PAGE_TITLE__", escaped_title).replace("__METRIC_OPTIONS__", options).replace("__SERIES_DATA__", payload).replace("__SAMPLING_NOTE__", sampling_note)
     output.write_text(page, encoding="utf-8")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Interaktiver Plot für einen Withings-CSV-Export")
-    parser.add_argument("--csv", type=Path, default=Path(__file__).parent / "Data" / "weight.csv", help="Pfad zur Withings-CSV")
+    parser = argparse.ArgumentParser(description="Interaktiver Plot für Withings-Daten aus dem Data-Ordner")
+    parser.add_argument("--csv", type=Path, help="Eine einzelne CSV-Datei statt aller Daten aus Data importieren")
     parser.add_argument("--output", type=Path, help="HTML-Ausgabedatei (Standard: neben dem Skript)")
     parser.add_argument("--no-open", action="store_true", help="HTML-Datei nicht automatisch im Browser öffnen")
     args = parser.parse_args()
     output = args.output or Path(__file__).parent / "weight_plot.html"
     try:
-        rows = read_measurements(args.csv)
+        if args.csv:
+            rows = deduplicate_measurements(read_measurements(args.csv))
+            source_count = 1
+            if not rows:
+                raise ValueError(f"Die CSV-Datei enthält keine Messwerte: {args.csv}")
+        else:
+            rows, source_count = read_data_directory(Path(__file__).parent / "Data")
         build_page(rows, output)
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, BadZipFile) as error:
         parser.error(str(error))
-    print(f"Plot erstellt: {output.resolve()} ({len(rows):,} Messungen)".replace(",", "."))
+    print(f"Plot erstellt: {output.resolve()} ({len(rows):,} Messungen aus {source_count} Datenquellen)".replace(",", "."))
     if not args.no_open:
         webbrowser.open(output.resolve().as_uri())
 
